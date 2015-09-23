@@ -1,0 +1,363 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html4/loose.dtd"> 
+<html>
+<head>
+<title>Lamport's Bakery algorithm in JavaScript</title>
+<style type="text/css">
+BODY
+{
+	width:700px;
+	font-family:Verdana;
+	font-size: 12px;
+	margin-left:auto;
+	margin-right:auto;
+}
+CODE
+{
+	padding:10px;
+	white-space:pre;
+	display:block;
+}
+IMG 
+{
+	display:block;
+}
+</style>
+</head>
+<body>
+<h1>Lamport's Bakery algorithm in JavaScript</h1>
+<h2>a.in.the.k@gmail.com</h2>
+<h2>Abstract</h2>
+<p>This paper presents implementation of the original Lamport's Bakery algorithm [1] in JavaScript language. 
+Our goal was to implement clear and simple rewrite of the original pseudo-code [1] to JavaScript, 
+with maximum stress to similarity. With this in mind, the algorithm can be verified 
+using the original proof of correctness [1].
+We also provide test case showing that "synchronization" 
+may be necessary in certain browsers and our bakery implementation can be used as possible solution. 
+We believe that implemented solution is much more elegant, readable and correct than the existing
+Wallace variation [2] widelly spread in the web. 
+
+<h2>Browsers - the need for mutual exclusion ?</h2>
+<h3>Testcase</h3>
+Let's have a function representing long task with the following logic:
+<code>
+/**
+generate rundom number C
+increment top.shared variable C times, 
+decrement top.shared variable C times
+value of top.shared should be the same before and after the method was stared. 
+**/
+function longTaskUnsafe(window,strMethod)
+{
+	var c=Math.random()* 10000;
+	top.Log.append(window,"S "+strMethod+" longTask:"+top.shared);
+	for(var i=0;i&lt;c;i++)
+	{
+		top.shared++;
+	}
+	for(var i=0;i&lt;c;i++)
+	{
+		top.shared--;
+	}
+	top.Log.append(window,"E "+strMethod+" longTask:"+top.shared);
+}
+</code>
+Let's have FRAMESET containing 5 FRAMEs. Each FRAME loads page with onload event handler <i>h2()</i>, 
+plus FRAMESET itself has onload handler <i>h1</i> defined.
+<br>
+If frameset is displayed, browser stars loading frame pages, and executes 5 handlers h2() and one handler h1. 
+In theory, several instances of h2() can run concurrently. 
+However, when tested in browser, results seem OK: handlers are run in sequence, and top.shared  has consistent values 0.
+<code>
+0	?f1	:	S h2 longTask:0
+36	?f1	:	E h2 longTask:0
+38	?f2	:	S h2 longTask:0
+44	?f2	:	E h2 longTask:0
+46	?f3	:	S h2 longTask:0
+47	?f3	:	E h2 longTask:0
+49	?f4	:	S h2 longTask:0
+174	?f4	:	E h2 longTask:0
+182	?f5	:	S h2 longTask:0
+182	?f5	:	E h2 longTask:0
+182	?fs	:	S h1 longTask:0
+255	?fs	:	E h1 longTask:0
+</code> 
+Now, let's introduce window.confirm between increment and decrement parts of the function:
+<code>
+function longTaskUnsafe(window,strMethod)
+{
+	var c=Math.random()* 10000;
+	top.Log.append(window,"S "+strMethod+" longTask:"+top.shared);
+	for(var i=0;i&lt;c;i++)
+	{
+		top.shared++;
+	}
+	<b>window.confirm(location.search+":"+strMethod);</b>
+	for(var i=0;i&lt;c;i++)
+	{
+		top.shared--;
+	}
+	top.Log.append(window,"E "+strMethod+" longTask:"+top.shared);
+}
+</code>
+This, introduces interesting results in some browsers:
+<h4>MSIE, Firefox, Opera (not Chrome,Safari)</h4>
+<code>
+0	?f1	:	S h2 longTask:0
+24	?f2	:	S h2 longTask:2043
+80	?f3	:	S h2 longTask:8850
+123	?f4	:	S h2 longTask:13941
+156	?f5	:	S h2 longTask:17602
+1534	?f5	:	E h2 longTask:17602
+1862	?f4	:	E h2 longTask:13941
+2112	?f3	:	E h2 longTask:8850
+2294	?f2	:	E h2 longTask:2043
+2443	?f1	:	E h2 longTask:0
+2444	?fs	:	S h1 longTask:0
+2629	?fs	:	E h1 longTask:0
+</code>
+Log shows, that while h2() in frame f1 was waiting for confirm, 
+browser started execution of h2() in different frame f2. Which started with non zero value (proving that f1.h2() has not finished yet). 
+<br>
+This shows that second function can be executed by browser's JavaScript engine, even if 
+previous function was not finished.
+Investigation why and when this can happen is out of the scope of this paper.
+Browsers are known to use several threads for FRAME, IMG, XmlHttpRequest,XSLTProcessor, Flesh and other object,
+and it is up to vendor how these threads interacts with JavaScript engine.
+<p>
+<b>Conclusion: Let's have two function f() and f'(). Under "certain circumstances", f'() can start execution even if f() has not finished yet.</b>
+<p>
+<b>
+We believe, this observation (with none explanation) 
+can be used as motivation to implement
+mutual exclusion implementation at the level of JavaScript functions. 
+</b>
+<h2>Pseudo-code rewrite</h2>
+<h3>Original pseodo-code</h3>
+<img src="Bakery.png" alt="Original pseudocode">
+Our goal is to create "1:1 re-write" of the original pseudo-code in JavaScript, 
+to keep correctness verification as simple as possible.
+JavaScript implementation introduces one main challenge:
+<ul>
+	<li>implement "do nothing", represented by <i>goto L2</i>,<i>goto L3</i> in the original pseudo code</li>
+</ul>
+Solution for this is setTimeout function. Using this construct however introduces another problems:
+<ul>
+	<li>Repeat only <b>part of the loop body</b> with <b>"remembered arguments",</b><i>j</i></li>
+	<li>Skip L2 check for certain <i>j</i> if already checked</li>
+	<li>Call original function (critical section) using setTimeout, 
+		 with original context <i>this</i> and orginal <i>arguments</i> </li>
+	
+</ul> 
+All these challenges can be solved using build in language constructs.
+<h3>Proposed JavaScript version</h3>
+<img src="BakeryJavaScript.png" alt="Proposed JavaScript code">
+<h3>Studying our code</h3>
+<p>
+Bakery.js code, creates <i>synchronization mechanism</i>, that allows us to turn original functions f,f' into 
+<i>synchronized functions</i>. 
+Synchronized in this context means, that if "f synchronized over bakery instance b" is running, 
+no other f' synchronized over the same bakery instance b will run. Second function f' will wait until there
+is no other synchronized method over b running. This is achieved by defering the execution of second function f' using setTimeout.
+<p>
+Critical sections of original algorithm are represented by whole functions f and f'. 
+Processes are rougly represented by logical threads, executing the method.
+<p>
+Gained effect is similar to synchronized methods in Java language, with explicit 
+synchronization over specific monitor b (this is just for illustration, we have not reached the semantics of synchronized in Java).
+<h4>Making functions synchronized</h4>
+<p>
+There are several ways to register a handler, and several types of functions used as handlers.
+Sample shows some of the combinations and challenges to be solved, when making function synchronized. 
+In short, if the original handler was passed certain <i>arguments</i> and was called with certain context <i>this</i>, 
+the same arguments and this context must be available in synchronized handler.
+Our style emphases nondestructive coding, which means 
+we try to keep the original functions intact, create synchronized wrappers
+and change handler registration from original function to synchronized version.
+<code>
+// before:
+function f1(obj,arg1,arg2)
+{
+	Log.append(window,"f1:"+obj.nodeName+","+arg1+","+arg2);
+}
+&lt;img id="img1" width=100 height=100 src="sample.png" onload="f1(this,'a1','a2');">
+// after:
+var f1s=b.createSynchronizedDelegate(f1);
+&lt;img id="img1" width=100 height=100 src="sample.png" onload="f1s(this,'a1','a2');">
+</code>
+That was demonstration of old style (DHTML) registration where user enters the name 
+of handler with optional parameters as part of the HTML structure.
+Newer approaches uses onload property (traditional) or addEventListener DOM API to register handler.
+In the second case, the scoping and this must be kept. 
+<code>
+// before
+&lt;img id="img2" width=100 height=100 src="sample.png">
+&lt;script>
+(function()
+{
+	var scope="s1";
+	function f2()
+	{
+		Log.append(window,"f2:"+this.nodeName+","+scope);
+	}
+	document.getElementById("img2").onload=f2;
+})();
+// after
+// note that this can be done outside of original f2 scope
+document.getElementById("img2").onload=b.createSynchronizedDelegate(
+	document.getElementById("img2").onload); 
+</code>
+<p>
+As seen, our Bakery.js implementation allows to concert existing code regardless on the
+registration or handler type without change to the original methods code and with minimal
+lines of extra code required. 
+<p>
+Of course, when writing new code from scratch, selected methods can be easily defined as synchronized
+without exposing the unsafe function. 
+<p>
+<b>
+Note: We limited the scope to functions without return value. 
+Which is typical to hanlers and is not considered an issue. 
+</b>
+<h4>Behaviour explained</h4>
+<p>
+Call to bakery.createSynchronizedDelegate takes reference to original function <i>originalFunction</i>, 
+and returns reference to new function <i>newFunction</i>. 
+This new function should be used as new event handler.
+When <b>creating the newFunction</b>,"process" is registered with bakery, but without performing "choosing phase".
+When <b>newFunction is called for the first time</b> by browser (event occured),
+the "choosing" phase executes,original context (this) and arguments (args) are stored.
+Waiting loop is encapsulated by attemp function defined inside the scope of newFunction 
+which means it can access that,args and j variables. 
+Finally call to newFunction also executes attempt().
+Attempt itself performes checks labeled L2 and L3 in the original pseodo-code. If those are not satisfied, 
+attemp defers itself with setTimeout and exists. 
+If l2 is satisfied it is marked as done, and attemt defered again to perform L3 check. 
+Next "defered loop" does not check for L2 again. 
+When both L2+l3 are satisfied for j, j is incremented (L2 flag cleared), 
+and loop is repeated for next j. 
+When all values of j are checked, original method is called 
+by applying original context (that) and arguments (args).
+Critical section is left. 
+<h4>Side effects</h4>
+When ticket choosing is moved from newFunction call to newFunction creation, the bakery can be used for ordering
+of the event handlers. This is one interesting feature not intentionaly implemented. 
+Order of createSynchronizedDelegate calls will dictate the order of handlers executed.
+Combined with several bakery instances on the same page can provide interesting functionality, 
+often needed in asynchronous interaction scenarios. 
+<code>
+// modified version with choosing in creation or first call 
+// introduced parameter explicitNumber
+// allows user to specify explicit number, not 1+max number generated by bakery.
+
+Bakery.prototype.createSynchronizedDelegate=function(originalFunction,explicitNumber)
+{
+	var b=this; 
+	var i=b.choosing.length;
+	b.choosing[i]=0;
+	b.number[i]=0;
+	
+	if(explicitNumber!=null) //extra optional choosing block in creation
+	{
+		b.choosing[i]=1;
+		b.number[i]=explicitNumber;
+		b.choosing[i]=0;
+	}
+	
+	function newFunction()
+	{
+		// store original context and params of method call 
+		var that=this;
+		var args=Array.prototype.slice.call(arguments);
+
+		if(explicitNumber==null)  // if chosen in creation, skip
+		{
+			// original choosing block in run
+			b.choosing[i]=1;
+			b.number[i]=1+Math.max.apply(null,b.number);
+			b.choosing[i]=0;
+		}	
+		.....
+</code>
+<h3>Testcase results with synchronized handlers</h3>
+Only h2 synchronized
+<code>
+0	?f4	:	S h2 longTask:0
+968	?fs	:	S h1 longTask:178
+1703	?fs	:	E h1 longTask:178
+2203	?f4	:	E h2 longTask:0
+2250	?f5	:	S h2 longTask:0
+2718	?f5	:	E h2 longTask:0
+2718	?f1	:	S h2 longTask:0
+3203	?f1	:	E h2 longTask:0
+3203	?f2	:	S h2 longTask:0
+3625	?f2	:	E h2 longTask:0
+3687	?f3	:	S h2 longTask:0
+4047	?f3	:	E h2 longTask:0
+</code>
+Both handlers synchronized
+<code>
+0	?f1	:	S h2 longTask:0
+1282	?f1	:	E h2 longTask:0
+1282	?f2	:	S h2 longTask:0
+1688	?f2	:	E h2 longTask:0
+1688	?f3	:	S h2 longTask:0
+2047	?f3	:	E h2 longTask:0
+2047	?f4	:	S h2 longTask:0
+2454	?f4	:	E h2 longTask:0
+2469	?f5	:	S h2 longTask:0
+2797	?f5	:	E h2 longTask:0
+2797	?fs	:	S h1 longTask:0
+3204	?fs	:	E h1 longTask:0
+</code>
+<h2>Existing solutions</h2>
+When googling for some existing JavaScript sources, 
+"Wallace variation" has been propagated strongly.
+Wikipedia as well contained link to this version of algorithm at the time of writing.
+<h3>Wallace variation</h3>
+Basically all my <b>subjective cons</b> of Wallace variation, 
+could be explained by authors little usage of native JavaScript features (closures, references)
+and tendencies towards OO:
+<ul>
+	<li>Incorrect ? (L2,L3 conditions merged into one, L2 re-evaluated if already passed)</li>
+	<li>Pretty far away from original pseudocode</li>
+	<li>Ugly bakery. Strings for setTimeout,..., reimplementation of sparse array,..., unreliable new Date()</li>
+	<li>Ugly clients. Lot of code needed, shifts developers from 
+		functional (natural) to Command pattern (artifical and verbose) implementation.</li>
+	<li>Error prone. Badly implemented clients (Commands), may break bakery (Mutex).</li>	
+</ul>
+All this is subjective, but all mentioned dislikes has been partial driver for our proposed version. 
+<h3>Others</h3>
+So far we have not found other implementations in JavaScript. Or at least not closely related to 
+Wallace variation.
+<h2>Conclusions</h2>
+Out solution presents simple and clear implementation of Bakery algorithm that can be used to ensure
+mutual exclusion of event handlers execution in threaded browsers.
+We have identified these benefits of our solution (compared to other existing solutions):
+<ul>
+	<li>Clear original pseudo-code rewrite - easy verification of correctness</li>
+	<li>Easy client code - "1 line of code" needed to change original unsynchronized handler 
+		to synchronized version. </li>
+	<li>Non destructive client code - can deal with variety of code styles, with redefinition 
+		of handlers outside of original code, can preserve original functions 
+		or by used as encasulation and hiding of unsafe code.</li> 
+	<li>Client style code is kept "functional" not OO oriented which is typical for handlers.</li>
+	<li>Original handler arguments and context is honored, without extra coding effort.</li>
+	<li>Multiple handlers with the same name can be synchronized</li>
+	<li>Handlers can be to synchronized over "several bakeries" not only one global.</li>
+	<li>Code has been tested on latest version of common browsers (MSIE 6,7,8, Firefox 3.x,Opera 9,10, Safari 3,4, Chrome 2)</li>
+</ul>
+We have identified these problems with our solution:
+<ul>
+	<li>Performance degradation //TODO: should be measured</li>
+</ul>
+<h2>Full source code + testcase + samples</h2>
+//TODO: comming soon
+<h2>Refferences</h2>
+//TODO: normative !
+<ol>
+	<li><a href="http://research.microsoft.com/users/lamport/pubs/pubs.html#bakery">A New Solution of Dijkstra's Concurrent Problem</a></li>
+	<li><A href="http://www.onjava.com/pub/a/onjava/2006/04/05/ajax-mutual-exclusion.html">Wallace Variation of Bakery Algorithm</A></li>
+	<li><A href="http://en.wikipedia.org/wiki/Lamport%27s_bakery_algorithm">Wikipedia article on the algorithm</A></li>
+</ol>
+</body>
+</html>
